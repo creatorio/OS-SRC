@@ -3,7 +3,8 @@
         "x86.h": "c",
         "stdio.h": "c",
         "uefilib.h": "c",
-        "stdbool.h": "c"
+        "stdbool.h": "c",
+        "cstdarg": "c"
     },
     "C_Cpp.errorSquiggles": "disabled",
     "C_Cpp.default.compilerPath": "/usr/bin/g++"

@@ -1,6 +1,6 @@
-export CFLAGS = -std=c99 -g
+export CFLAGS =-std=c17 -MMD -Wall -Wextra -Wpedantic -mno-red-zone -ffreestanding
 export ASMFLAGS =
-export CC = gcc
+export CC = clang
 export CXX = g++
 export LD = gcc
 export ASM = nasm

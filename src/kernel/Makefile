@@ -1,32 +1,28 @@
-TARGET_ASMFLAGS += -f elf64
-TARGET_CFLAGS += -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-sse2
-TARGET_LIBS += -lgcc
-TARGET_LINKFLAGS += -T linker.ld -nostdlib
+.PHONY: all clean
 
-SOURCES_C=$(wildcard *.c)
-SOURCES_ASM=$(wildcard *.asm)
-OBJECTS_C=$(patsubst %.c, $(BUILD_DIR)/kernel/c/%.obj, $(SOURCES_C))
-OBJECTS_ASM=$(patsubst %.asm, $(BUILD_DIR)/kernel/asm/%.obj, $(SOURCES_ASM))
+all: kernelbin kernelelf kernelbinpe kernelpe
 
-.PHONY: all kernel clean always
+kernelbin: $(BUILD_DIR)/kernel.bin
+$(BUILD_DIR)/kernel.bin: kernel.c
+	@sudo clang -c $(CFLAGS) -fPIE -o $(BUILD_DIR)/kernel.o ./kernel.c
+	@echo "--> Compiled Kernel.c"
+	@sudo ld -nostdlib -pie -e kmain --oformat binary -o $(BUILD_DIR)/kernel.bin $(BUILD_DIR)/kernel.o 
+	@echo "--> Created Kernel.bin"
 
-all: kernel
+kernelelf: $(BUILD_DIR)/kernel.elf
+$(BUILD_DIR)/kernel.elf: kernel.c
+	sudo clang $(CFLAGS) -fPIE -e kmain -nostdlib -o $(BUILD_DIR)/kernel.elf ./kernel.c
 
-kernel: $(BUILD_DIR)/kernel.bin
+kernelbinpe: $(BUILD_DIR)/kernel.binpe
+$(BUILD_DIR)/kernel.binpe: kernel.c
+	sudo x86_64-w64-mingw32-gcc -c $(CFLAGS) -fPIE -o $(BUILD_DIR)/kernel.o ./kernel.c
+	sudo x86_64-w64-mingw32-ld -pie -nostdlib -e kmain -o $(BUILD_DIR)/kernel.obj $(BUILD_DIR)/kernel.o 
+	objcopy -O binary $(BUILD_DIR)/kernel.obj $@
 
-$(BUILD_DIR)/kernel.bin: $(OBJECTS_ASM) $(OBJECTS_C)
-	@$(TARGET_LD64) $(TARGET_LINKFLAGS) -Wl,-Map=$(BUILD_DIR)/kernel.map -o $@ $^ $(TARGET_LIBS)
-	@echo "--> Created:  kernel.bin"
+kernelpe: $(BUILD_DIR)/kernel.pe
+$(BUILD_DIR)/kernel.pe: kernel.c
+	sudo x86_64-w64-mingw32-gcc $(CFLAGS) -fPIE -e kmain -nostdlib -o $(BUILD_DIR)/kernel.pe ./kernel.c
 
-$(BUILD_DIR)/kernel/c/%.obj: %.c
-	@mkdir -p $(@D)
-	@$(TARGET_CC64) $(TARGET_CFLAGS) -c -o $@ $<
-	@echo "--> Compiled: " $<
-
-$(BUILD_DIR)/kernel/asm/%.obj: %.asm
-	@mkdir -p $(@D)
-	@$(TARGET_ASM) $(TARGET_ASMFLAGS) -o $@ $<
-	@echo "--> Compiled: " $<
 
 clean:
-	rm -f $(BUILD_DIR)/kernel.bin
+	@rm -f $(BUILD_DIR)/kernel.bin

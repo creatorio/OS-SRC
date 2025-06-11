@@ -1,10 +1,1 @@
-	@sgdisk -o /dev/sdb
-	@sgdisk -n 0:0:0:ef00 /dev/sdb
-	@sudo mkfs.fat -F 32 /dev/sdb1
-	@sudo mount /dev/sdb1 /mnt
-	@sudo mkdir /mnt/EFI
-	@sudo mkdir /mnt/EFI/BOOT
-	@sudo cp $(BUILD_DIR)/BOOTX64.EFI /mnt/EFI/BOOT/
-	@sudo cp $(BUILD_DIR)/kernel.bin  /mnt/
-	@sudo umount /mnt
-	@echo "--> Formatted: USB Hardware Boot"
+aaaaaaaaaaaaaaa

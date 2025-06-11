@@ -1,5 +1,5 @@
 #include "uefilib.h"
-
+EFI_EVENT timer_event;
 EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
 {
     INIT(SystemTable, ImageHandl);
@@ -13,28 +13,38 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
             printf(u"%x", (CHAR16)key.UnicodeChar);
             get_key();*/
     bool running = true;
-
+    const CHAR16 *Menu_Choices[9] = {
+        u"Set Text Mode",
+        u"Set Graphics Mode",
+        u"Test Mouse",
+        u"Read ESP File",
+        u"Print Block IO Partitions",
+        u"Print Memory Map",
+        u"Print Configuration Tables",
+        u"Print ACPI Tables",
+        u"Load Kernel",
+    };
+    EFI_STATUS (*mfuncs[])(void) = {
+        set_text_mode,
+        set_graphics_mode,
+        test_mouse,
+        read_file_ESP,
+        print_block_io_partitions,
+        print_memory_map,
+        print_configuration_table,
+        print_ACPI_table,
+        load_kernel,
+    };
     while (running)
     {
         cout->ClearScreen(cout);
-        const CHAR16 *Menu_Choices[4] = {
-            u"Set Text Mode",
-            u"Set Graphics Mode",
-            u"Test Mouse",
-            u"Read ESP File",
-        };
-        const EFI_STATUS (*mfuncs[])(void) = {
-            set_text_mode,
-            set_graphics_mode,
-            test_mouse,
-            read_file_ESP,
-        };
+
         UINTN cols = 0, rows = 0;
         cout->QueryMode(cout, cout->Mode->Mode, &cols, &rows);
 
         screen_bounds datetime_context = {cols, rows};
 
-        EFI_EVENT timer_event;
+        bs->CloseEvent(timer_event);
 
         bs->CreateEvent(EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK, print_datetime, (void *)&datetime_context, &timer_event);
 
@@ -86,8 +96,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
                 break;
             case ESC:
                 bs->CloseEvent(timer_event);
-                rs->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
-
+                // rs->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+                return EFI_SUCCESS;
             default:
                 if ((CHAR16)key.UnicodeChar == 0xd)
                 {
