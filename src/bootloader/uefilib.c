@@ -16,7 +16,6 @@ EFI_GRAPHICS_OUTPUT_BLT_PIXEL cursor_buffer[] = {
     px_EFIBLUE, px_EFIBLUE, px_EFIBLUE, px_LGRAY, px_EFIBLUE, px_EFIBLUE, px_EFIBLUE, px_LGRAY
 
 };
-Page_Table *pml4 = NULL;
 EGWS CTGAS[6] = {
     {EFI_ACPI_TABLE_GUID, u"EFI_ACPI_TABLE_GUID"},
     {ACPI_TABLE_GUID, u"ACPI_TABLE_GUID"},
@@ -35,6 +34,65 @@ void INIT(EFI_SYSTEM_TABLE *ST, EFI_HANDLE ImageHandl)
     ih = ImageHandl;
 }
 
+PML5_Status pml5_status;
+Page_Table *pml5;
+Page_Table *pml4;
+
+#define CR4_LA57 (1ULL << 12) // CR4 bit 12 enables 5-level paging
+
+// Inline function to read CR4
+static inline uint64_t read_cr4(void)
+{
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    return cr4;
+}
+
+// Inline function to write CR4
+static inline void write_cr4(uint64_t cr4)
+{
+    __asm__ volatile("mov %0, %%cr4" ::"r"(cr4));
+}
+
+// Inline function to check CPUID (leaf 7, subleaf 0)
+static inline bool is_pml5_supported_cpuid(void)
+{
+    uint32_t eax, ebx, ecx, edx;
+    eax = 7;
+    ecx = 0;
+    __asm__ volatile(
+        "cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(eax), "c"(ecx));
+    return (ecx & (1 << 16)) != 0; // Check LA57 bit (bit 16 of ECX)
+}
+
+// Function to check PML5
+PML5_Status detect_pml5(void)
+{
+    if (!is_pml5_supported_cpuid())
+    {
+        printf(u"PML5 Not Supported");
+        return pml5_status; // Not supported
+    }
+    printf(u"PML5 Supported");
+    pml5_status.supported = true;
+    return pml5_status;
+}
+
+PML5_Status enable_PML5()
+{
+    uint64_t cr4 = read_cr4();
+
+    if ((!(cr4 & CR4_LA57) && pml5_status.supported))
+    {
+        cr4 |= CR4_LA57;
+        write_cr4(cr4); // Enable 5-level paging
+        pml5_status.enabled = true;
+    }
+    return pml5_status;
+}
+
 bool print_guid(EFI_GUID guid)
 {
     UINT8 *p = (UINT8 *)&guid;
@@ -42,6 +100,149 @@ bool print_guid(EFI_GUID guid)
                   *(UINT32 *)&p[0], *(UINT16 *)&p[4], *(UINT16 *)&p[6],
                   (UINTN)p[8], (UINTN)p[9], (UINTN)p[10], (UINTN)p[11],
                   (UINTN)p[12], (UINTN)p[13], (UINTN)p[14], (UINTN)p[15]);
+}
+void *mmap_allocate_pages(Memory_Map_Info *mmap, UINTN pages)
+{
+    static void *next_page_address = NULL; // Next page/page range address to return to caller
+    static UINTN current_descriptor = 0;   // Current descriptor number
+    static UINTN remaining_pages = 0;      // Remaining pages in current descriptor
+
+    if (remaining_pages < pages)
+    {
+        // Not enough remaining pages in current descriptor, find the next available one
+        UINTN i = current_descriptor + 1;
+        for (; i < mmap->size / mmap->desc_size; i++)
+        {
+            EFI_MEMORY_DESCRIPTOR *desc =
+                (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+
+            if (desc->Type == EfiConventionalMemory && desc->NumberOfPages >= pages)
+            {
+                // Found enough memory to use at this descriptor, use it
+                current_descriptor = i;
+                remaining_pages = desc->NumberOfPages - pages;
+                next_page_address = (void *)(desc->PhysicalStart + (pages * PAGE_SIZE));
+                return (void *)desc->PhysicalStart;
+            }
+        }
+
+        if (i >= mmap->size / mmap->desc_size)
+        {
+            // Ran out of descriptors to check in memory map
+            error(0, u"\r\nCould not find any memory to allocate pages for.\r\n");
+            return NULL;
+        }
+    }
+
+    // Else we have at least enough pages for this allocation, return the current spot in
+    //   the memory map
+    remaining_pages -= pages;
+    void *page = next_page_address;
+    next_page_address = (void *)((UINT8 *)page + (pages * PAGE_SIZE));
+    return page;
+}
+void map_page(uint64_t physical_address, uint64_t virtual_address, Memory_Map_Info *mmap)
+{
+    int flags = PRESENT | READWRITE | USER;
+
+    uint64_t pml5_index = (virtual_address >> 48) & 0x1FF;
+    uint64_t pml4_index = (virtual_address >> 39) & 0x1FF;
+    uint64_t pdpt_index = (virtual_address >> 30) & 0x1FF;
+    uint64_t pdt_index = (virtual_address >> 21) & 0x1FF;
+    uint64_t pt_index = (virtual_address >> 12) & 0x1FF;
+
+    Page_Table *top_level;
+
+    if (pml5_status.supported)
+    {
+        // Use PML5 as top-level page table
+        if (!(pml5->entries[pml5_index] & PRESENT))
+        {
+            void *pml4_address = mmap_allocate_pages(mmap, 1);
+            memset(pml4_address, 0, sizeof(Page_Table));
+            pml5->entries[pml5_index] = (uint64_t)pml4_address | flags;
+        }
+        top_level = (Page_Table *)(pml5->entries[pml5_index] & PHYS_PAGE_ADDRESS_MASK);
+    }
+    else
+    {
+        // No PML5, use PML4 directly
+        top_level = pml4;
+    }
+
+    // Make sure pdpt exists, if not then allocate it
+    if (!(top_level->entries[pml4_index] & PRESENT))
+    {
+        void *pdpt_address = mmap_allocate_pages(mmap, 1);
+
+        memset(pdpt_address, 0, sizeof(Page_Table));
+        top_level->entries[pml4_index] = (uint64_t)pdpt_address | flags;
+    }
+
+    // Make sure pdt exists, if not then allocate it
+    Page_Table *pdpt = (Page_Table *)(top_level->entries[pml4_index] & PHYS_PAGE_ADDRESS_MASK);
+    if (!(pdpt->entries[pdpt_index] & PRESENT))
+    {
+        void *pdt_address = mmap_allocate_pages(mmap, 1);
+
+        memset(pdt_address, 0, sizeof(Page_Table));
+        pdpt->entries[pdpt_index] = (uint64_t)pdt_address | flags;
+    }
+
+    // Make sure pt exists, if not then allocate it
+    Page_Table *pdt = (Page_Table *)(pdpt->entries[pdpt_index] & PHYS_PAGE_ADDRESS_MASK);
+    if (!(pdt->entries[pdt_index] & PRESENT))
+    {
+        void *pt_address = mmap_allocate_pages(mmap, 1);
+
+        memset(pt_address, 0, sizeof(Page_Table));
+        pdt->entries[pdt_index] = (uint64_t)pt_address | flags;
+    }
+
+    // Map new page physical address if not present
+    Page_Table *pt = (Page_Table *)(pdt->entries[pdt_index] & PHYS_PAGE_ADDRESS_MASK);
+    if (!(pt->entries[pt_index] & PRESENT))
+        pt->entries[pt_index] = (physical_address & PHYS_PAGE_ADDRESS_MASK) | flags;
+}
+void unmap_page(uint64_t virtual_address)
+{
+    uint64_t pml5_index = (virtual_address >> 48) & 0x1FF;
+    uint64_t pml4_index = (virtual_address >> 39) & 0x1FF;
+    uint64_t pdpt_index = (virtual_address >> 30) & 0x1FF;
+    uint64_t pdt_index = (virtual_address >> 21) & 0x1FF;
+    uint64_t pt_index = (virtual_address >> 12) & 0x1FF;
+
+    Page_Table *current;
+
+    if (pml5_status.enabled)
+    {
+        if (!(pml5->entries[pml5_index] & PRESENT))
+            return;
+        current = (Page_Table *)(pml5->entries[pml5_index] & PHYS_PAGE_ADDRESS_MASK);
+    }
+    else
+    {
+        current = pml4;
+    }
+
+    if (!(current->entries[pml4_index] & PRESENT))
+        return;
+    current = (Page_Table *)(current->entries[pml4_index] & PHYS_PAGE_ADDRESS_MASK);
+
+    if (!(current->entries[pdpt_index] & PRESENT))
+        return;
+    current = (Page_Table *)(current->entries[pdpt_index] & PHYS_PAGE_ADDRESS_MASK);
+
+    if (!(current->entries[pdt_index] & PRESENT))
+        return;
+    current = (Page_Table *)(current->entries[pdt_index] & PHYS_PAGE_ADDRESS_MASK);
+
+    if (!(current->entries[pt_index] & PRESENT))
+        return;
+
+    current->entries[pt_index] = 0;
+
+    __asm__ __volatile__("invlpg (%0)" : : "r"(virtual_address) : "memory");
 }
 
 VOID *read_esp_file_to_buffer(CHAR16 *path, UINTN *size)
@@ -710,40 +911,7 @@ EFI_STATUS print_ACPI_table(void)
     return status;
 }
 
-void *mmap_allocate_pages(Memory_Map_Info *mmap, UINTN pages)
-{
-    static void *next_page_address = NULL;
-    static UINTN current_descriptor = 0;
-    static UINTN remaining_pages = 0;
-
-    if (remaining_pages < pages)
-    {
-        UINTN i = current_descriptor + 1;
-        for (; i < mmap->size / mmap->desc_size; i++)
-        {
-            EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
-            if (desc->Type == EfiConventionalMemory && desc->NumberOfPages >= pages)
-            {
-                current_descriptor = i;
-                remaining_pages = desc->NumberOfPages - pages;
-                next_page_address = (void *)(desc->PhysicalStart + (pages * PAGE_SIZE));
-                return (void *)desc->PhysicalStart;
-            }
-        }
-        if (i >= mmap->size / mmap->desc_size)
-        {
-            error(u"ERROR: Could Not Find Any memory to allocate pages to");
-            return NULL;
-        }
-    }
-
-    remaining_pages -= pages;
-    void *page = next_page_address;
-    next_page_address = (void *)((UINT8 *)page + (pages * PAGE_SIZE));
-    return page;
-}
-
-void map_page(UINTN physical_address, UINTN virtual_address, Memory_Map_Info *mmap)
+/*void map_page(UINTN physical_address, UINTN virtual_address, Memory_Map_Info *mmap)
 {
     int flags = PRESENT | READWRITE | USER;
 
@@ -762,53 +930,54 @@ void map_page(UINTN physical_address, UINTN virtual_address, Memory_Map_Info *mm
        Page_Table *pml4 = (Page_Table *)(pml5->entries[pml5_index] & PHYS_PAGE_ADDRESS_MASK);
 
           */
+/*
 
-    if (!(pml4->entries[pml4_index] && PRESENT))
-    {
-        void *pdpt_address = mmap_allocate_pages(mmap, 1);
-        memset(pdpt_address, 0, sizeof(Page_Table));
-        pml4->entries[pml4_index] = (UINTN)pdpt_address | flags;
-    }
+if (!(pml4->entries[pml4_index] && PRESENT))
+{
+void *pdpt_address = mmap_allocate_pages(mmap, 1);
+memset(pdpt_address, 0, sizeof(Page_Table));
+pml4->entries[pml4_index] = (UINTN)pdpt_address | flags;
+}
 
-    Page_Table *pdpt = (Page_Table *)(pml4->entries[pml4_index] & PHYS_PAGE_ADDRESS_MASK);
-    if (!(pdpt->entries[pdpt_index] && PRESENT))
-    {
-        void *pdt_address = mmap_allocate_pages(mmap, 1);
-        memset(pdt_address, 0, sizeof(Page_Table));
-        pdpt->entries[pdpt_index] = (UINTN)pdt_address | flags;
-    }
+Page_Table *pdpt = (Page_Table *)(pml4->entries[pml4_index] & PHYS_PAGE_ADDRESS_MASK);
+if (!(pdpt->entries[pdpt_index] && PRESENT))
+{
+void *pdt_address = mmap_allocate_pages(mmap, 1);
+memset(pdt_address, 0, sizeof(Page_Table));
+pdpt->entries[pdpt_index] = (UINTN)pdt_address | flags;
+}
 
-    Page_Table *pdt = (Page_Table *)(pdpt->entries[pdpt_index] & PHYS_PAGE_ADDRESS_MASK);
-    if (!(pdt->entries[pdt_index] && PRESENT))
-    {
-        void *pt_address = mmap_allocate_pages(mmap, 1);
-        memset(pt_address, 0, sizeof(Page_Table));
-        pdt->entries[pdt_index] = (UINTN)pt_address | flags;
-    }
+Page_Table *pdt = (Page_Table *)(pdpt->entries[pdpt_index] & PHYS_PAGE_ADDRESS_MASK);
+if (!(pdt->entries[pdt_index] && PRESENT))
+{
+void *pt_address = mmap_allocate_pages(mmap, 1);
+memset(pt_address, 0, sizeof(Page_Table));
+pdt->entries[pdt_index] = (UINTN)pt_address | flags;
+}
 
-    Page_Table *pt = (Page_Table *)(pdt->entries[pdt_index] & PHYS_PAGE_ADDRESS_MASK);
-    if (!(pt->entries[pt_index] && PRESENT))
-    {
-        pt->entries[pt_index] = (physical_address & PHYS_PAGE_ADDRESS_MASK) | flags;
-    }
+Page_Table *pt = (Page_Table *)(pdt->entries[pdt_index] & PHYS_PAGE_ADDRESS_MASK);
+if (!(pt->entries[pt_index] && PRESENT))
+{
+pt->entries[pt_index] = (physical_address & PHYS_PAGE_ADDRESS_MASK) | flags;
+}
 }
 
 void unmap_page(UINTN virtual_address)
 {
-    // UINTN pml5_index = (virtual_address) >> 48 && 0x1FF;
-    UINTN pml4_index = ((virtual_address) >> 39) && 0x1FF;
-    UINTN pdpt_index = ((virtual_address) >> 30) && 0x1FF;
-    UINTN pdt_index = ((virtual_address) >> 21) && 0x1FF;
-    UINTN pt_index = ((virtual_address) >> 12) && 0x1FF;
+// UINTN pml5_index = (virtual_address) >> 48 && 0x1FF;
+UINTN pml4_index = ((virtual_address) >> 39) && 0x1FF;
+UINTN pdpt_index = ((virtual_address) >> 30) && 0x1FF;
+UINTN pdt_index = ((virtual_address) >> 21) && 0x1FF;
+UINTN pt_index = ((virtual_address) >> 12) && 0x1FF;
 
-    //    Page_Table *pml4 = (Page_Table *)(pml5->entries[pml5_index] & PHYS_PAGE_ADDRESS_MASK);
-    Page_Table *pdpt = (Page_Table *)(pml4->entries[pml4_index] & PHYS_PAGE_ADDRESS_MASK);
-    Page_Table *pdt = (Page_Table *)(pdpt->entries[pdpt_index] & PHYS_PAGE_ADDRESS_MASK);
-    Page_Table *pt = (Page_Table *)(pdt->entries[pdt_index] & PHYS_PAGE_ADDRESS_MASK);
-    pt->entries[pt_index] = 0;
+Page_Table *pml4 = (Page_Table *)(pml5->entries[pml5_index] & PHYS_PAGE_ADDRESS_MASK);
+Page_Table *pdpt = (Page_Table *)(pml4->entries[pml4_index] & PHYS_PAGE_ADDRESS_MASK);
+Page_Table *pdt = (Page_Table *)(pdpt->entries[pdpt_index] & PHYS_PAGE_ADDRESS_MASK);
+Page_Table *pt = (Page_Table *)(pdt->entries[pdt_index] & PHYS_PAGE_ADDRESS_MASK);
+pt->entries[pt_index] = 0;
 
-    __asm__ __volatile__("invlpg (%0)\n" : : "r"(virtual_address));
-}
+__asm__ __volatile__("invlpg (%0)\n" : : "r"(virtual_address));
+}*/
 
 void identity_map_page(UINTN address, Memory_Map_Info *mmap)
 {
@@ -819,54 +988,73 @@ void identity_map_efi_mmap(Memory_Map_Info *mmap)
 {
     for (UINTN i = 0; i < mmap->size / mmap->desc_size; i++)
     {
-        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+        EFI_MEMORY_DESCRIPTOR *desc =
+            (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+
         for (UINTN j = 0; j < desc->NumberOfPages; j++)
-        {
             identity_map_page(desc->PhysicalStart + (j * PAGE_SIZE), mmap);
-        }
     }
 }
 
 void set_runtime_address_map(Memory_Map_Info *mmap)
 {
+    // First get amount of memory to allocate for runtime memory map
     UINTN runtime_descriptors = 0;
     for (UINTN i = 0; i < mmap->size / mmap->desc_size; i++)
     {
-        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+        EFI_MEMORY_DESCRIPTOR *desc =
+            (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+
         if (desc->Attribute & EFI_MEMORY_RUNTIME)
             runtime_descriptors++;
     }
-    UINTN runtime_mmap_pages = (runtime_descriptors * sizeof(EFI_MEMORY_DESCRIPTOR)) + ((PAGE_SIZE - 1) / PAGE_SIZE);
+
+    // Allocate memory for runtime memory map
+    UINTN runtime_mmap_pages = (runtime_descriptors * mmap->desc_size) + ((PAGE_SIZE - 1) / PAGE_SIZE);
     EFI_MEMORY_DESCRIPTOR *runtime_mmap = mmap_allocate_pages(mmap, runtime_mmap_pages);
     if (!runtime_mmap)
     {
-        error(u"ERROR: Could Not allocate runtime descriptos memory map");
+        error(0, u"Could not allocate runtime descriptors memory map\r\n");
         return;
     }
 
+    // Identity map all runtime descriptors in each descriptor
     UINTN runtime_mmap_size = runtime_mmap_pages * PAGE_SIZE;
     memset(runtime_mmap, 0, runtime_mmap_size);
 
-    UINTN current_desc = 0;
+    // Set all runtime descriptors in new runtime memory map, and identity map them
+    UINTN curr_runtime_desc = 0;
     for (UINTN i = 0; i < mmap->size / mmap->desc_size; i++)
     {
-        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+        EFI_MEMORY_DESCRIPTOR *desc =
+            (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+
         if (desc->Attribute & EFI_MEMORY_RUNTIME)
         {
-            EFI_MEMORY_DESCRIPTOR *runtime_desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)runtime_mmap + (current_desc * mmap->desc_size));
+            EFI_MEMORY_DESCRIPTOR *runtime_desc =
+                (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)runtime_mmap + (curr_runtime_desc * mmap->desc_size));
+
             memcpy(runtime_desc, desc, mmap->desc_size);
             runtime_desc->VirtualStart = runtime_desc->PhysicalStart;
-            current_desc++;
+            curr_runtime_desc++;
         }
     }
 
-    EFI_STATUS status = rs->SetVirtualAddressMap(runtime_mmap_size, mmap->desc_size, mmap->desc_version, runtime_mmap);
+    // Set new virtual addresses for runtime memory via SetVirtualAddressMap()
+    EFI_STATUS status = rs->SetVirtualAddressMap(runtime_mmap_size,
+                                                 mmap->desc_size,
+                                                 mmap->desc_version,
+                                                 runtime_mmap);
     if (EFI_ERROR(status))
-    {
-        error(u"Error: SetVirtualAddressMap()");
-    }
+        error(0, u"SetVirtualAddressMap()\r\n");
 }
-
+void init_page_tables(Memory_Map_Info *mmap)
+{
+    pml5 = mmap_allocate_pages(mmap, 1);
+    pml4 = mmap_allocate_pages(mmap, 1);
+    memset(pml5, 0, sizeof *pml5);
+    memset(pml4, 0, sizeof *pml4);
+}
 EFI_STATUS load_kernel(void)
 {
     VOID *disk_buffer = NULL;
@@ -982,7 +1170,10 @@ EFI_STATUS load_kernel(void)
         kernel_size = file_size;
     }
 
-    printf(u"\r\n Kernel address: %x, size: %u, entry_point: %x\r\n", kernel_buffer, kernel_size, (UINTN)entry_point);
+    UINTN entry_offset = (UINTN)entry_point - kernel_buffer;
+    Entry_Point higher_entry_point = (Entry_Point)(KERNEL_START_ADDRESS + entry_offset);
+
+    printf(u"\r\nOld Kernel address: %x, size: %u, entry_point: %x\r\nNew Entry: %x", kernel_buffer, kernel_size, (UINTN)entry_point, (UINTN)higher_entry_point);
 
     if (!entry_point)
     {
@@ -990,6 +1181,7 @@ EFI_STATUS load_kernel(void)
         goto cleanup;
     }
 
+    detect_pml5();
     printf(u"press any key to load kernel");
     get_key();
 
@@ -1023,7 +1215,8 @@ EFI_STATUS load_kernel(void)
     kparms.NumberOfTableEntries = st->NumberOfTableEntries;
     kparms.ConfigurationTable = st->ConfigurationTable;
 
-    pml4 = mmap_allocate_pages(&kparms.mmap, 1);
+    init_page_tables(&kparms.mmap);
+
     memset(pml4, 0, sizeof *pml4);
 
     identity_map_efi_mmap(&kparms.mmap);
@@ -1034,11 +1227,6 @@ EFI_STATUS load_kernel(void)
     {
         map_page(kernel_buffer + (PAGE_SIZE * i), KERNEL_START_ADDRESS + (PAGE_SIZE * i), &kparms.mmap);
     }
-
-
-    UINTN entry_offset = (UINTN)entry_point - kernel_buffer;
-    Entry_Point higher_entry_point = (Entry_Point)(KERNEL_START_ADDRESS + entry_offset);
-
 
     for (UINTN i = 0; i < (kparms.gop_mode.FrameBufferSize + (PAGE_SIZE - 1)) / PAGE_SIZE; i++)
     {
@@ -1078,7 +1266,7 @@ EFI_STATUS load_kernel(void)
             .base_63_32 = (tss_address >> 32) & 0xFFFFFFFF,
         }};
 
-    Descriptor_Register gdtr = {.limit = sizeof gdt - 1 , .base = (UINT64)&gdt};
+    Descriptor_Register gdtr = {.limit = sizeof gdt - 1, .base = (UINT64)&gdt};
 
     Kernel_Parms *kparms_ptr = &kparms;
     UINT32 *fb = (UINT32 *)kparms.gop_mode.FrameBufferBase;
@@ -1092,13 +1280,14 @@ EFI_STATUS load_kernel(void)
             fb[y * xres + x] = 0xFFDDDDDD;
         }
     }
-    //entry_point(kparms_ptr);
+    enable_PML5();
+    // entry_point(kparms_ptr);
     __asm__ __volatile__(
-        "cli\n"                     // Clear interrupts before setting new GDT/TSS, etc.
-        "movq %[pml4], %%rax\n"     // Load new page tables
-        "movq %%rax, %%CR3\n"     // Load new page tables
-        "lgdt %[gdt]\n"             // Load new GDT from gdtr register
-        "ltr %[tss]\n"              // Load new task register with new TSS value (byte offset into GDT)
+        "cli\n"                  // Clear interrupts before setting new GDT/TSS, etc.
+        "movq %[pgtbl], %%rax\n" // Load new page tables
+        "movq %%rax, %%CR3\n"    // Load new page tables
+        "lgdt %[gdt]\n"          // Load new GDT from gdtr register
+        "ltr %[tss]\n"           // Load new task register with new TSS value (byte offset into GDT)
 
         // Jump to new code segment in GDT (offset in GDT of 64 bit kernel/system code segment)
         "pushq $0x8\n"
@@ -1108,23 +1297,23 @@ EFI_STATUS load_kernel(void)
 
         // Executing code with new Code segment now, set up remaining segment registers
         "1:\n"
-        "movq $0x10, %%RAX\n"   // Data segment to use (64 bit kernel data segment, offset in GDT)
-        "movq %%RAX, %%DS\n"    // Data segment
-        "movq %%RAX, %%ES\n"    // Extra segment
-        "movq %%RAX, %%FS\n"    // Extra segment (2), these also have different uses in Long Mode
-        "movq %%RAX, %%GS\n"    // Extra segment (3), these also have different uses in Long Mode
-        "movq %%RAX, %%SS\n"    // Stack segment
+        "movq $0x10, %%RAX\n" // Data segment to use (64 bit kernel data segment, offset in GDT)
+        "movq %%RAX, %%DS\n"  // Data segment
+        "movq %%RAX, %%ES\n"  // Extra segment
+        "movq %%RAX, %%FS\n"  // Extra segment (2), these also have different uses in Long Mode
+        "movq %%RAX, %%GS\n"  // Extra segment (3), these also have different uses in Long Mode
+        "movq %%RAX, %%SS\n"  // Stack segment
 
         // Set new stack value to use (for SP/stack pointer, etc.)
         "movq %[stack], %%RSP\n"
 
         // Call new entry point in higher memory
         "callq *%[entry]\n" // First parameter is kparms in RCX in input constraints below, for MS ABI
-      :
-      : [pml4]"r"(pml4), [gdt]"m"(gdtr), [tss]"r"((uint16_t)offsetof(GDT, tss)),
-        [stack]"gm"((uint64_t)kernel_stack + (STACK_PAGES * PAGE_SIZE)),    // Top of newly allocated stack
-        [entry]"r"(higher_entry_point), "c"(kparms_ptr)
-      : "rax", "memory");
+        :
+        : [pgtbl] "r"((Page_Table *)(pml5_status.enabled ? pml5 : pml4)), [gdt] "m"(gdtr), [tss] "r"((uint16_t)offsetof(GDT, tss)),
+          [stack] "gm"((uint64_t)kernel_stack + (STACK_PAGES * PAGE_SIZE)), // Top of newly allocated stack
+          [entry] "r"(higher_entry_point), "c"(kparms_ptr)
+        : "rax", "memory");
 
     __builtin_unreachable();
 

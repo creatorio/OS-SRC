@@ -219,6 +219,13 @@ typedef struct
     UINTN rows;
 } screen_bounds;
 
+typedef struct {
+    bool supported;
+    bool enabled;
+} PML5_Status;
+
+extern PML5_Status pml5_status;
+
 enum
 {
     PRESENT = (1 << 0),
@@ -230,9 +237,11 @@ typedef struct
 {
     UINT64 entries[512];
 } Page_Table;
-extern Page_Table *pml4;
+extern Page_Table *pml5;         // If PML5 enabled, top-level table pointer
+extern Page_Table *pml4;         // Otherwise top-level table pointer
 
-// TODO: Types for descriptors: GDT, TSS, TSS DESC
+
+//Types for descriptors: GDT, TSS, TSS DESC
 
 typedef struct
 {

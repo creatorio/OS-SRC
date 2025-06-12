@@ -63,7 +63,7 @@ $(BUILD_DIR)/uefiAPP.img: bootloader kernel
 	@sudo losetup -d /dev/loop0
 	@echo "--> Created: " $@
 	@echo "--> Emulating: Hard Disk Boot With Qemu Uefi APP"
-	@qemu-system-x86_64 -drive format=raw,file=./build/uefiAPP.img -bios /home/osmaker/Downloads/bios64_app.bin -m 256M -vga std -name TESTOS -machine q35 -usb -device usb-mouse -rtc base=localtime 
+	@qemu-system-x86_64 -cpu Icelake-Server-v6 -drive format=raw,file=./build/uefiAPP.img -bios /home/osmaker/Downloads/bios64_app.bin -m 256M -vga std -name TESTOS -machine q35 -usb -device usb-mouse -rtc base=localtime 
 
 QM: $(BUILD_DIR)/uefiQM.img
 $(BUILD_DIR)/uefiQM.img: bootloader kernel
