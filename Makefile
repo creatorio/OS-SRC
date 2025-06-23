@@ -67,9 +67,9 @@ $(BUILD_DIR)/uefiAPP.img: bootloader kernel
 
 QM: $(BUILD_DIR)/uefiQM.img
 $(BUILD_DIR)/uefiQM.img: bootloader kernel
-	@sudo /home/osmaker/Downloads/UEFI-GPT-image-creator-a77b0e6655459221f71f131500275e725b40cfbb/write_gpt -ae /EFI/BOOT/ ./build/BOOTX64.EFI / ./testefi.txt -ad ./build/$(KERNEL) -ds 5 -es 35 -i ./build/uefiQM.img
+	@sudo /home/osmaker/Downloads/UEFI-GPT-image-creator-a77b0e6655459221f71f131500275e725b40cfbb/write_gpt -ae /EFI/BOOT/ ./build/BOOTX64.EFI / ./testefi.txt -ad ./build/$(KERNEL) -ds 10 -es 35 -i ./build/uefiQM.img
 	@echo "--> Emulating: Hard Disk Boot With Qemu Uefi SPP using QM"
-	@sudo qemu-system-x86_64 -gdb tcp::1234 -drive format=raw,file=./build/uefiQM.img -bios /home/osmaker/Downloads/bios64.bin -m 256M -vga std -name TESTOS -machine q35 -usb -device usb-mouse -rtc base=localtime 
+	@sudo qemu-system-x86_64 -s -S -drive format=raw,file=./build/uefiQM.img -bios /home/osmaker/Downloads/bios64.bin -m 256M -vga std -name TESTOS -machine q35 -usb -device usb-mouse -rtc base=localtime 
 #
 # Bootloader
 #

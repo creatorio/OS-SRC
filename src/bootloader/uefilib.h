@@ -12,6 +12,7 @@ EFI_INPUT_KEY get_key(void);
 void INIT(EFI_SYSTEM_TABLE *ST, EFI_HANDLE ImageHandle);
 bool printf(CHAR16 *fmt, ...);
 bool error(CHAR16 *fmt, ...);
+extern INT32 text_rows, text_cols;
 
 extern EFI_STATUS test_mouse(void);
 extern EFI_STATUS set_text_mode(void);
@@ -21,16 +22,20 @@ extern EFI_STATUS print_block_io_partitions(void);
 extern EFI_STATUS print_memory_map(void);
 extern EFI_STATUS print_configuration_table(void);
 extern EFI_STATUS print_ACPI_table(void);
+extern EFI_STATUS print_efi_global_variables(void);
+extern EFI_STATUS change_global_variables(void);
 extern EFI_STATUS load_kernel(void);
 extern VOID print_datetime(IN EFI_EVENT event, IN VOID *Context);
 extern EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *cout;
 extern EFI_SIMPLE_TEXT_INPUT_PROTOCOL *cin;
+extern EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *cerr;
+extern EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *printf_cout;
 extern EFI_HANDLE ih;
 extern EFI_SYSTEM_TABLE *st;
 extern EFI_BOOT_SERVICES *bs;
 extern EFI_RUNTIME_SERVICES *rs;
 extern EFI_EVENT timer_event;
-
+extern CHAR16 *EFI_ERROR_STRINGS[MAX_EFI_ERROR];
 // -----------------
 // Global constants
 // -----------------
@@ -188,9 +193,10 @@ typedef struct
     EFI_RUNTIME_SERVICES *RuntimeServices;
     EFI_CONFIGURATION_TABLE *ConfigurationTable;
     UINTN NumberOfTableEntries;
+    //UINT8* FONT;
 } Kernel_Parms;
 
-typedef void EFIAPI (*Entry_Point)(Kernel_Parms*);
+typedef void EFIAPI (*Entry_Point)(Kernel_Parms *);
 
 typedef struct
 {
@@ -219,7 +225,8 @@ typedef struct
     UINTN rows;
 } screen_bounds;
 
-typedef struct {
+typedef struct
+{
     bool supported;
     bool enabled;
 } PML5_Status;
@@ -237,11 +244,10 @@ typedef struct
 {
     UINT64 entries[512];
 } Page_Table;
-extern Page_Table *pml5;         // If PML5 enabled, top-level table pointer
-extern Page_Table *pml4;         // Otherwise top-level table pointer
+extern Page_Table *pml5; // If PML5 enabled, top-level table pointer
+extern Page_Table *pml4; // Otherwise top-level table pointer
 
-
-//Types for descriptors: GDT, TSS, TSS DESC
+// Types for descriptors: GDT, TSS, TSS DESC
 
 typedef struct
 {
@@ -326,26 +332,37 @@ typedef struct
     TSS_LDT_Descriptor tss;
 } GDT;
 
-CHAR16 *
-strcpy_u16(CHAR16 *dst, const CHAR16 *src);
-INTN strncmp_u16(CHAR16 *s1, CHAR16 *s2, UINTN len);
-CHAR16 *strrchr_u16(CHAR16 *str, CHAR16 c);
-CHAR16 *strcat_u16(CHAR16 *dst, CHAR16 *src);
-VOID *memset(VOID *dst, UINT8 c, UINTN len);
-VOID *memcpy(VOID *dst, VOID *src, UINTN len);
-INTN memcmp(VOID *m1, VOID *m2, UINTN len);
-UINTN strlen(char *s);
-bool isdigit(char c);
-char *strstr(char *haystack, char *needle);
-INTN strcmp(char *s1, char *s2);
-EFI_STATUS get_memory_map(Memory_Map_Info *mmap);
-VOID *get_config_table_by_guid(EFI_GUID guid);
+extern CHAR16 *strcpy_u16(CHAR16 *dst, const CHAR16 *src);
+extern INTN strncmp_u16(CHAR16 *s1, CHAR16 *s2, UINTN len);
+extern CHAR16 *strrchr_u16(CHAR16 *str, CHAR16 c);
+extern CHAR16 *strcat_u16(CHAR16 *dst, CHAR16 *src);
+extern CHAR16 *strcat_c16(CHAR16 *dst, CHAR16 *src);
+extern CHAR16 *strcpy_c16(CHAR16 *dst, CHAR16 *src);
+extern UINTN strlen_c16(CHAR16 *s);
+extern CHAR16 *strrev_c16(CHAR16 *s);
+extern BOOLEAN add_int_to_buf_c16(UINTN number, UINT8 base, BOOLEAN signed_num, UINTN min_digits, CHAR16 *buf, UINTN *buf_idx);
+extern bool format_string_c16(CHAR16 *buf, CHAR16 *fmt, va_list args);
+extern bool vfprintf_c16(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *stream, CHAR16 *fmt, va_list args);
+extern bool printf(CHAR16 *fmt, ...);
+extern BOOLEAN get_num(UINTN *number, UINT8 base);
+extern VOID *memset(VOID *dst, UINT8 c, UINTN len);
+extern VOID *memcpy(VOID *dst, VOID *src, UINTN len);
+extern INTN memcmp(VOID *m1, VOID *m2, UINTN len);
+extern UINTN strlen(char *s);
+extern bool isdigit(char c);
+extern BOOLEAN isdigit_c16(CHAR16 c);
+extern BOOLEAN isxdigit_c16(CHAR16 c);
+extern char *strstr(char *haystack, char *needle);
+extern INTN strcmp(char *s1, char *s2);
+extern EFI_STATUS get_memory_map(Memory_Map_Info *mmap);
+extern VOID *get_config_table_by_guid(EFI_GUID guid);
+#define bfsztopgs(buf_size) ((buf_size + (PAGE_SIZE - 1)) / PAGE_SIZE)
 #define px_LGRAY 0xee, 0xee, 0xee, 0x00
 #define px_BLACK 0x00, 0x00, 0x00, 0x00
 #define px_EFIBLUE 0x98, 0x00, 0x00, 0x00
 #define ESC 0x17
 #define UP_ARROW 0x1
-#define DOWN_ARROW 0x2
+#define DOWN_ARROW 02
 #define DEFAULT_FG_COLOR EFI_YELLOW
 #define DEFAULT_BG_COLOR EFI_BLUE
 #define HIGHLIGHT_FG_COLOR EFI_BLUE

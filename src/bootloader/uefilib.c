@@ -1,5 +1,7 @@
 #include "uefilib.h"
 EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *cout = NULL;
+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *cerr = NULL;
+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *printf_cout = NULL;
 EFI_SIMPLE_TEXT_INPUT_PROTOCOL *cin = NULL;
 EFI_HANDLE ih = NULL;
 EFI_SYSTEM_TABLE *st = NULL;
@@ -16,6 +18,323 @@ EFI_GRAPHICS_OUTPUT_BLT_PIXEL cursor_buffer[] = {
     px_EFIBLUE, px_EFIBLUE, px_EFIBLUE, px_LGRAY, px_EFIBLUE, px_EFIBLUE, px_EFIBLUE, px_LGRAY
 
 };
+
+EFI_STATUS change_global_variables(void)
+{
+    EFI_STATUS status;
+    UINTN pages_allocated;
+    cout->ClearScreen(cout);
+
+    EFI_GUID dpttpg = EFI_DEVICE_PATH_TO_TEXT_PROTOCOL_GUID;
+    EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *dpttp;
+    status = bs->LocateProtocol(&dpttpg, NULL, (VOID **)&dpttp);
+    if (EFI_ERROR(status))
+    {
+        error(u"ERROR %x Could not locate device path to text protocol\r\n", status);
+    }
+    while (true)
+    {
+        UINTN var_name_size = 0;
+        CHAR16 *var_name_buf = 0;
+        EFI_GUID vendor_guid = {0};
+        UINT32 boot_order_attributes;
+        var_name_size = 2;
+
+        status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, bfsztopgs(var_name_size), (VOID **)&var_name_buf);
+        if (EFI_ERROR(status))
+        {
+            error(u"Could Not Allocate 2 bytes");
+            return status;
+        }
+
+        *var_name_buf = u'\0';
+
+        pages_allocated = bfsztopgs(var_name_size);
+
+        UINTN temp_size = var_name_size;
+
+        status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+
+        while (status != EFI_NOT_FOUND)
+        {
+            if (status == EFI_BUFFER_TOO_SMALL)
+            {
+                CHAR16 *temp_buf = NULL;
+
+                status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, bfsztopgs(var_name_size), (VOID **)&temp_buf);
+                if (EFI_ERROR(status))
+                {
+                    error(u"Could Not Allocate %u bytes of memory for next variable name", var_name_size);
+                    return status;
+                }
+
+                memcpy(temp_buf, var_name_buf, temp_size);
+
+                bs->FreePages(var_name_buf, pages_allocated);
+                pages_allocated = bfsztopgs(var_name_size);
+
+                var_name_buf = temp_buf;
+                temp_size = var_name_size;
+
+                status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+
+                continue;
+            }
+
+            if (!memcmp(var_name_buf, u"Boot", 8))
+            {
+                printf(u"%s\r\n", var_name_buf);
+
+                UINT32 attributes = 0;
+                UINTN data_size = 0;
+                VOID *data = NULL;
+
+                rs->GetVariable(var_name_buf, &vendor_guid, &attributes, &data_size, NULL);
+
+                status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, bfsztopgs(data_size), (VOID **)&data);
+                if (EFI_ERROR(status))
+                {
+                    error(u"Could Not Allocate %u bytes of memory for GetVariable()", data_size);
+                    goto cleanup;
+                }
+
+                UINTN allocdata = data_size;
+
+                rs->GetVariable(var_name_buf, &vendor_guid, &attributes, &data_size, data);
+
+                if (isxdigit_c16(var_name_buf[5]))
+                {
+                    EFI_LOAD_OPTION *load_option = (EFI_LOAD_OPTION *)data;
+                    CHAR16 *description = (CHAR16 *)((UINT8 *)data + sizeof(UINT32) + sizeof(UINT16));
+                    printf(u"%s\r\n", description);
+                    UINTN len = strlen_c16(description);
+                    len++;
+
+                    EFI_DEVICE_PATH_PROTOCOL *FilePathList = (EFI_DEVICE_PATH_PROTOCOL *)(description + len);
+
+                    CHAR16 *device_path_text = dpttp->ConvertDevicePathToText(FilePathList, FALSE, FALSE);
+                    if (!device_path_text)
+                    {
+                        printf(u"Device Path: (null)\r\n\r\n");
+                    }
+                    else
+                    {
+                        printf(u"Device Path: %s\r\n\r\n", device_path_text);
+                    }
+
+                    UINT8 *optional_data = (UINT8 *)FilePathList + load_option->FilePathListLength;
+                    UINTN optional_data_size = data_size - (optional_data - (UINT8 *)data);
+                    if (optional_data_size > 0)
+                    {
+                        printf(u"Optional Data: ");
+                        for (UINTN j = 0; j < optional_data_size; j++)
+                        {
+                            printf(u"%.2hhx", optional_data[j]);
+                        }
+                        printf(u"\r\n");
+                    }
+                }
+                if (!memcmp(var_name_buf, u"BootOrder", 18))
+                {
+                    boot_order_attributes = attributes;
+                    UINT16 *p = data;
+                    for (UINTN i = 0; i < data_size / (2); i++)
+                    {
+                        printf(u"%.4x,", *p++);
+                    }
+                }
+                if (!memcmp(var_name_buf, u"BootNext", 16) || !memcmp(var_name_buf, u"BootCurrent", 22))
+                {
+                    printf(u"%u\r\n\r\n", ((UINT32) * ((UINT16 *)data)));
+                }
+
+                if (!memcmp(var_name_buf, u"BootOptionSupport", 34) || !memcmp(var_name_buf, u"BootCurrent", 22))
+                {
+                    printf(u"%x\r\n\r\n", *(UINT32 *)data);
+                }
+
+                bs->FreePages(data, bfsztopgs(allocdata));
+            }
+
+            // Pause at bottom of screen
+            if (cout->Mode->CursorRow >= text_rows - 2)
+            {
+                printf(u"Press any key to continue...\r\n");
+                get_key();
+                cout->ClearScreen(cout);
+            }
+
+            status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+        
+        }
+
+ printf(u"Press '1' to change BootOrder, '2' to change BootNext, or other to go back...");
+        EFI_INPUT_KEY key = get_key();
+        if (key.UnicodeChar == u'1') {
+            // Change BootOrder - set new array of UINT16 values
+            #define MAX_BOOT_OPTIONS 10
+            UINT16 option_array[MAX_BOOT_OPTIONS] = {0};
+            UINTN new_option = 0;
+            UINT16 num_options = 0;
+            for (UINTN i = 0; i < MAX_BOOT_OPTIONS; i++) {
+                printf(u"\r\nBoot Option %u (0000-FFFF): ", i+1);
+                if (!get_num(&new_option, 16)) break;    // Stop processing
+                option_array[num_options++] = new_option; 
+            }
+
+            EFI_GUID guid = EFI_GLOBAL_VARIABLE_GUID;
+            status = rs->SetVariable(u"BootOrder", 
+                                     &guid,
+                                     boot_order_attributes, 
+                                     num_options*2, 
+                                     option_array);
+            if (EFI_ERROR(status)) 
+                error(status, u"Could not Set new value for BootOrder.\r\n");
+
+        } else if (key.UnicodeChar == u'2') {
+            // Change BootNext value - set new UINT16
+            printf(u"\r\nBootNext value (0000-FFFF): ");
+            UINTN value = 0;
+            if (get_num(&value, 16)) {
+                EFI_GUID guid = EFI_GLOBAL_VARIABLE_GUID;
+                UINT32 attr = EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                              EFI_VARIABLE_RUNTIME_ACCESS;
+
+                status = rs->SetVariable(u"BootNext", &guid, attr, 2, &value);
+                if (EFI_ERROR(status)) 
+                    error(status, u"Could not Set new value for BootNext.\r\n");
+            }
+
+        }
+        else
+        {
+            bs->FreePages(var_name_buf, pages_allocated);
+            break;
+        }
+
+    cleanup:
+        bs->FreePages(var_name_buf, pages_allocated);
+    }
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS print_efi_global_variables(void)
+{
+    UINTN pages_allocated;
+    cout->ClearScreen(cout);
+
+    UINTN var_name_size = 0;
+    CHAR16 *var_name_buf = 0;
+    EFI_GUID vendor_guid = {0};
+
+    var_name_size = 2;
+    EFI_STATUS status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, bfsztopgs(var_name_size), (VOID **)&var_name_buf);
+    if (EFI_ERROR(status))
+    {
+        error(u"Could Not Allocate 2 bytes");
+        return status;
+    }
+
+    *var_name_buf = u'\0';
+
+    pages_allocated = bfsztopgs(var_name_size);
+
+    UINTN temp_size = var_name_size;
+
+    status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+
+    while (status != EFI_NOT_FOUND)
+    {
+        if (status == EFI_BUFFER_TOO_SMALL)
+        {
+            CHAR16 *temp_buf = NULL;
+
+            status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, bfsztopgs(var_name_size), (VOID **)&temp_buf);
+            if (EFI_ERROR(status))
+            {
+                error(u"Could Not Allocate %u bytes of memory for next variable name", var_name_size);
+                return status;
+            }
+
+            memcpy(temp_buf, var_name_buf, temp_size);
+
+            bs->FreePages(var_name_buf, pages_allocated);
+            pages_allocated = bfsztopgs(var_name_size);
+
+            var_name_buf = temp_buf;
+            temp_size = var_name_size;
+
+            status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+
+            continue;
+        }
+
+        printf(u"%s\r\n");
+
+        if (cout->Mode->CursorRow >= text_rows - 2)
+        {
+            get_key();
+            cout->ClearScreen(cout);
+        }
+
+        status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+    }
+
+    bs->FreePages(var_name_buf, pages_allocated);
+    get_key();
+    return EFI_SUCCESS;
+}
+
+INT32 text_rows = 0, text_cols = 0;
+BOOLEAN get_num(UINTN *number, UINT8 base)
+{
+    EFI_INPUT_KEY key = {0};
+
+    if (!number)
+        return false; // Passed in NULL pointer
+
+    UINT8 pos = 0;
+    *number = 0;
+    do
+    {
+        key = get_key();
+        if (key.ScanCode == SCANCODE_ESC)
+            return false; // User wants to leave
+
+        // Backspace
+        if (key.UnicodeChar == u'\b' && pos > 0)
+        {
+            printf(u"\b");
+            pos--;
+            *number /= base; // Remove last digit
+        }
+
+        if (isdigit_c16(key.UnicodeChar))
+        {
+            *number = (*number * base) + (key.UnicodeChar - u'0');
+            printf(u"%c", key.UnicodeChar);
+            pos++;
+        }
+        else if (base == 16)
+        {
+            if (key.UnicodeChar >= u'a' && key.UnicodeChar <= u'f')
+            {
+                *number = (*number * base) + (key.UnicodeChar - u'a' + 10);
+                printf(u"%c", key.UnicodeChar);
+                pos++;
+            }
+            else if (key.UnicodeChar >= u'A' && key.UnicodeChar <= u'F')
+            {
+                *number = (*number * base) + (key.UnicodeChar - u'A' + 10);
+                printf(u"%c", key.UnicodeChar);
+                pos++;
+            }
+        }
+    } while (key.UnicodeChar != u'\r');
+
+    return true;
+}
+
 EGWS CTGAS[6] = {
     {EFI_ACPI_TABLE_GUID, u"EFI_ACPI_TABLE_GUID"},
     {ACPI_TABLE_GUID, u"ACPI_TABLE_GUID"},
@@ -30,6 +349,8 @@ void INIT(EFI_SYSTEM_TABLE *ST, EFI_HANDLE ImageHandl)
     bs = ST->BootServices;
     rs = ST->RuntimeServices;
     cout = ST->ConOut;
+    cerr = cout;
+    printf_cout = cout;
     cin = ST->ConIn;
     ih = ImageHandl;
 }
@@ -296,7 +617,9 @@ VOID *read_esp_file_to_buffer(CHAR16 *path, UINTN *size)
     }
 
     buf_size = info.FileSize;
-    status = bs->AllocatePool(EfiLoaderData, buf_size, &file_buffer);
+    UINTN pages_needed = (buf_size + (PAGE_SIZE - 1)) / PAGE_SIZE;
+    status = bs->AllocatePages(AllocateAnyPages, EfiLoaderCode, pages_needed, &file_buffer);
+
     if (EFI_ERROR(status) || buf_size != info.FileSize)
     {
         error(u"  ERROR: %x\r\nCould not allocate memory pool for file: %s", status, path);
@@ -396,7 +719,7 @@ EFI_PHYSICAL_ADDRESS read_disk_lbas_to_buffer(EFI_LBA disk_lba, UINTN data_size,
         goto cleanup;
     }
     UINTN pages_needed = (data_size + (PAGE_SIZE - 1)) / PAGE_SIZE;
-    // status = bs->AllocatePool(EfiLoaderData, max_memory_needed, &program_buffer);
+
     if (executable)
     {
         status = bs->AllocatePages(AllocateAnyPages, EfiLoaderCode, pages_needed, &buffer);
@@ -405,7 +728,7 @@ EFI_PHYSICAL_ADDRESS read_disk_lbas_to_buffer(EFI_LBA disk_lba, UINTN data_size,
     {
         status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, pages_needed, &buffer);
     }
-    // status = bs->AllocatePool(EfiLoaderData, data_size, &buffer);
+
     if (EFI_ERROR(status))
     {
         error(u"\r\nERROR: %x; Could Not allocat file buffer for disk data. \r\n", status);
@@ -491,6 +814,16 @@ bool isdigit(char c)
 {
     return c >= '0' && c <= '9';
 }
+BOOLEAN isdigit_c16(CHAR16 c)
+{
+    return c >= u'0' && c <= u'9';
+}
+BOOLEAN isxdigit_c16(CHAR16 c)
+{
+    return (c >= u'0' && c <= u'9') ||
+           (c >= u'a' && c <= u'f') ||
+           (c >= u'A' && c <= u'F');
+}
 
 VOID *load_elf(VOID *elf_buffer, EFI_PHYSICAL_ADDRESS *file_buffer, UINTN *file_size)
 {
@@ -544,7 +877,7 @@ VOID *load_elf(VOID *elf_buffer, EFI_PHYSICAL_ADDRESS *file_buffer, UINTN *file_
     EFI_STATUS status;
     EFI_PHYSICAL_ADDRESS program_buffer = 0;
     UINTN pages_needed = (max_memory_needed + (PAGE_SIZE - 1)) / PAGE_SIZE;
-    // status = bs->AllocatePool(EfiLoaderData, max_memory_needed, &program_buffer);
+
     status = bs->AllocatePages(AllocateAnyPages, EfiLoaderCode, pages_needed, &program_buffer);
     if (EFI_ERROR(status))
     {
@@ -577,7 +910,7 @@ VOID *load_elf(VOID *elf_buffer, EFI_PHYSICAL_ADDRESS *file_buffer, UINTN *file_
         memcpy(dst, src, len);
     }
 
-    VOID *entry_point = (VOID *)((UINT8 *)program_buffer + (ehdr->e_entry - mem_min));
+    VOID *entry_point = (VOID *)((UINT8 *)program_buffer + (ehdr->e_entry));
 
     return entry_point;
 }
@@ -631,7 +964,7 @@ VOID *load_pe(VOID *pe_buffer, EFI_PHYSICAL_ADDRESS *file_buffer, UINTN *file_si
 
     EFI_PHYSICAL_ADDRESS program_buffer = 0;
     UINTN pages_needed = (opt_hdr->SizeOfImage + (PAGE_SIZE - 1)) / PAGE_SIZE;
-    // EFI_STATUS status = bs->AllocatePool(EfiLoaderData, opt_hdr->SizeOfImage, &program_buffer);
+
     EFI_STATUS status = bs->AllocatePages(AllocateAnyPages, EfiLoaderCode, pages_needed, &program_buffer);
     if (EFI_ERROR(status))
     {
@@ -699,7 +1032,9 @@ EFI_STATUS get_memory_map(Memory_Map_Info *mmap)
     }
 
     mmap->size += mmap->desc_size * 2;
-    status = bs->AllocatePool(EfiLoaderData, mmap->size, (VOID **)&mmap->map);
+    UINTN pages_needed = (mmap->size + (PAGE_SIZE - 1)) / PAGE_SIZE;
+    status = bs->AllocatePages(AllocateAnyPages, EfiLoaderCode, pages_needed, (VOID **)&mmap->map);
+
     if (EFI_ERROR(status))
     {
         error(u"Error %x: Could Not Allocate Memory for Memory Map", status);
@@ -743,15 +1078,17 @@ EFI_STATUS print_memory_map(void)
         {
             usable_bytes += desc->NumberOfPages * 4096;
         }
-        if (i > 0 && i % 20 == 0)
+        if (cout->Mode->CursorRow >= text_rows - 2)
         {
             get_key();
+            cout->ClearScreen(cout);
         }
     }
+    UINTN pages_needed = (mmap.size + (PAGE_SIZE - 1)) / PAGE_SIZE;
 
     error(u"\r\nUsable memory: %u / %u Mib / %u Gib", usable_bytes, usable_bytes / (1024 * 1024), usable_bytes / (1024 * 1024 * 1024));
     //    printf(u"after getkey");
-    bs->FreePool(mmap.map);
+    bs->FreePages(mmap.map, pages_needed);
     return status;
 }
 
@@ -1057,6 +1394,8 @@ void init_page_tables(Memory_Map_Info *mmap)
 }
 EFI_STATUS load_kernel(void)
 {
+    detect_pml5();
+    get_key();
     VOID *disk_buffer = NULL;
     VOID *file_buffer = NULL;
     EFI_STATUS status = EFI_SUCCESS;
@@ -1121,7 +1460,8 @@ EFI_STATUS load_kernel(void)
     if (EFI_ERROR(status))
     {
         error(u"Error: %x; Could Not Get MediaID value for disk image\r\n", status);
-        bs->FreePool(file_buffer);
+        UINTN pages_needed = (buf_size + (PAGE_SIZE - 1)) / PAGE_SIZE;
+        bs->FreePages(file_buffer, pages_needed);
         goto exit;
     }
 
@@ -1129,7 +1469,8 @@ EFI_STATUS load_kernel(void)
     if (!disk_buffer)
     {
         error(u"Could Not Read Data partition file to buffer\r\n");
-        bs->FreePool(file_buffer);
+        UINTN pages_needed = (buf_size + (PAGE_SIZE - 1)) / PAGE_SIZE;
+        bs->FreePages(file_buffer, pages_needed);
         goto exit;
     }
 
@@ -1181,7 +1522,6 @@ EFI_STATUS load_kernel(void)
         goto cleanup;
     }
 
-    detect_pml5();
     printf(u"press any key to load kernel");
     get_key();
 
@@ -1196,7 +1536,8 @@ EFI_STATUS load_kernel(void)
     UINTN retries = 0;
     while (EFI_ERROR(bs->ExitBootServices(ih, kparms.mmap.key)) && retries < 10)
     {
-        bs->FreePool(kparms.mmap.map);
+        UINTN pages_needed = (kparms.mmap.size + (PAGE_SIZE - 1)) / PAGE_SIZE;
+        bs->FreePages(kparms.mmap.map, pages_needed);
         if (EFI_ERROR(get_memory_map(&kparms.mmap)))
         {
             goto cleanup;
@@ -1318,8 +1659,10 @@ EFI_STATUS load_kernel(void)
     __builtin_unreachable();
 
 cleanup:
-    bs->FreePool(file_buffer);
-    bs->FreePool(disk_buffer);
+    UINTN pages_needed = (buf_size + (PAGE_SIZE - 1)) / PAGE_SIZE;
+    bs->FreePages(file_buffer, pages_needed);
+    pages_needed = (kernel_size + (PAGE_SIZE - 1)) / PAGE_SIZE;
+    bs->FreePages(disk_buffer, pages_needed);
 
 exit:
     printf(u"\r\nPress any key to go back\r\n");
@@ -1624,7 +1967,9 @@ EFI_STATUS read_file_ESP(void)
 
                 VOID *buffer = NULL;
                 buf_size = file_info.FileSize;
-                status = bs->AllocatePool(EfiLoaderData, buf_size, &buffer);
+                UINTN pages_needed = (buf_size + (PAGE_SIZE - 1)) / PAGE_SIZE;
+                status = bs->AllocatePages(AllocateAnyPages, EfiLoaderCode, pages_needed, &buffer);
+
                 if (EFI_ERROR(status))
                 {
                     printf(u"  ERROR: %x\r\nCould not allocate memory for file: %s", status, file_info.FileName);
@@ -1687,7 +2032,7 @@ EFI_STATUS read_file_ESP(void)
                     pos++;
                 }
                 get_key();
-                bs->FreePool(buffer);
+                bs->FreePages(buffer, pages_needed);
                 dirp->Close(file);
             }
             break;
@@ -2333,6 +2678,7 @@ EFI_STATUS set_text_mode(void)
                         cout->ClearScreen(cout);
                         printf(u"  ERROR: %x; DEVICE ERROR\r\n", status);
                         get_key();
+                        mode_index = modee;
                         cout->SetMode(cout, modee);
                     }
                     else if (status == EFI_UNSUPPORTED)
@@ -2341,10 +2687,12 @@ EFI_STATUS set_text_mode(void)
                         printf(u"  ERROR: %x; Mode number was not valid\r\n", status);
                         printf(u"  Press any key to continue");
                         get_key();
+                        mode_index = modee;
                         cout->SetMode(cout, modee);
                     }
                 }
-
+                text_rows = gop_modes[mode_index].height;
+                text_cols = gop_modes[mode_index].width;
                 getting_input = false;
                 break;
             }
@@ -2368,22 +2716,87 @@ EFI_INPUT_KEY get_key(void)
     return key;
 }
 
-bool print_number(UINTN number, UINT8 base, bool is_signed)
+bool error(CHAR16 *fmt, ...)
 {
+    printf_cout = cerr;
+    va_list args;
+    va_start(args, fmt);
+    bool result = printf(fmt, args);
+    va_end(args);
+    get_key();
+    printf_cout = cout;
+    return result;
+}
 
+CHAR16 *strcat_c16(CHAR16 *dst, CHAR16 *src)
+{
+    CHAR16 *s = dst;
+
+    while (*s)
+        s++; // Go until null terminator
+
+    while (*src)
+        *s++ = *src++; // Copy src to dst at null position
+
+    *s = u'\0'; // Null terminate new string
+
+    return dst;
+}
+
+CHAR16 *strcpy_c16(CHAR16 *dst, CHAR16 *src)
+{
+    if (!dst || !src)
+        return dst;
+
+    CHAR16 *result = dst;
+    while (*src)
+        *dst++ = *src++;
+
+    *dst = u'\0'; // Null terminate
+
+    return result;
+}
+
+UINTN strlen_c16(CHAR16 *s)
+{
+    UINTN len = 0;
+    while (*s++)
+        len++;
+    return len;
+}
+
+CHAR16 *strrev_c16(CHAR16 *s)
+{
+    if (!s)
+        return s;
+
+    CHAR16 *start = s, *end = s + strlen_c16(s) - 1;
+    while (start < end)
+    {
+        CHAR16 temp = *end; // Swap
+        *end-- = *start;
+        *start++ = temp;
+    }
+
+    return s;
+}
+
+BOOLEAN add_int_to_buf_c16(UINTN number, UINT8 base, BOOLEAN signed_num, UINTN min_digits, CHAR16 *buf,
+                           UINTN *buf_idx)
+{
     const CHAR16 *digits = u"0123456789ABCDEF";
-    CHAR16 buffer[32]; // Hopefully enough for UINTN_MAX (UINT64_MAX) + sign character
+    CHAR16 buffer[24]; // Hopefully enough for UINTN_MAX (UINT64_MAX) + sign character
     UINTN i = 0;
     BOOLEAN negative = FALSE;
 
     if (base > 16)
     {
-        cout->OutputString(cout, u"  Invalid base specified!\r\n");
+        cerr->OutputString(cerr, u"Invalid base specified!\r\n");
         return FALSE; // Invalid base
     }
 
     // Only use and print negative numbers if decimal and signed True
-    if (base == 10 && is_signed && (INTN)number < 0)
+    if (base == 10 && signed_num && (INTN)number < 0)
     {
         number = -(INTN)number; // Get absolute value of correct signed value to get digits to print
         negative = TRUE;
@@ -2395,125 +2808,423 @@ bool print_number(UINTN number, UINT8 base, bool is_signed)
         number /= base;
     } while (number > 0);
 
-    // Print negative sign for decimal numbers
+    while (i < min_digits)
+        buffer[i++] = u'0'; // Pad with 0s
+
+    // Add negative sign for decimal numbers
     if (base == 10 && negative)
         buffer[i++] = u'-';
-    if (base == 2)
-    {
-        buffer[i++] = u'b';
-        buffer[i++] = u'0';
-    }
-    if (base == 8)
-    {
-        buffer[i++] = u'o';
-        buffer[i++] = u'0';
-    }
-    if (base == 16)
-    {
-        buffer[i++] = u'x';
-        buffer[i++] = u'0';
-    }
 
     // NULL terminate string
     buffer[i--] = u'\0';
 
-    // Reverse buffer before printing
-    for (UINTN j = 0; j < i; j++, i--)
-    {
-        // Swap digits
-        UINTN temp = buffer[i];
-        buffer[i] = buffer[j];
-        buffer[j] = temp;
-    }
+    // Reverse buffer to read left to right
+    strrev_c16(buffer);
 
-    cout->OutputString(cout, buffer);
+    // Add number string to input buffer for printing
+    for (CHAR16 *p = buffer; *p; p++)
+    {
+        buf[*buf_idx] = *p;
+        *buf_idx += 1;
+    }
     return TRUE;
 }
 
-bool printf(CHAR16 *fmt, ...)
+bool format_string_c16(CHAR16 *buf, CHAR16 *fmt, va_list args)
 {
     bool result = true;
-    CHAR16 str[2];
-    va_list args;
-    va_start(args, fmt);
+    CHAR16 charstr[2] = {0};
+    UINTN buf_idx = 0;
 
-    str[0] = u'\0', str[1] = u'\0';
     for (UINTN i = 0; fmt[i] != u'\0'; i++)
     {
         if (fmt[i] == u'%')
         {
+            bool alternate_form = false;
+            UINTN min_field_width = 0;
+            UINTN precision = 0;
+            UINTN length_bits = 0;
+            UINTN num_printed = 0; // # of digits/chars printed for numbers or strings
+            UINT8 base = 0;
+            bool input_precision = false;
+            bool signed_num = false;
+            bool int_num = false;
+            bool double_num = false;
+            bool left_justify = false; // Left justify text from '-' flag instead of default right justify
+            bool space_flag = false;
+            bool plus_flag = false;
+            CHAR16 padding_char = ' '; // '0' or ' ' depending on flags
             i++;
+
+            // Check for flags
+            while (true)
+            {
+                switch (fmt[i])
+                {
+                case u'#':
+                    // Alternate form
+                    alternate_form = true;
+                    i++;
+                    continue;
+
+                case u'0':
+                    // 0-pad numbers on the left, unless '-' or precision is also defined
+                    padding_char = '0';
+                    i++;
+                    continue;
+
+                case u' ':
+                    // Print a space before positive signed number conversion or empty string
+                    //   number conversions
+                    space_flag = true;
+                    if (plus_flag)
+                        space_flag = false; // Plus flag '+' overrides space flag
+                    i++;
+                    continue;
+
+                case u'+':
+                    // Always print +/- before a signed number conversion
+                    plus_flag = true;
+                    if (space_flag)
+                        space_flag = false; // Plus flag '+' overrides space flag
+                    i++;
+                    continue;
+
+                case u'-':
+                    left_justify = true;
+                    i++;
+                    continue;
+
+                default:
+                    break;
+                }
+                break; // No more flags
+            }
+
+            // Check for minimum field width e.g. in "8.2" this would be 8
+            if (fmt[i] == u'*')
+            {
+                // Get int argument for min field width
+                min_field_width = va_arg(args, int);
+                i++;
+            }
+            else
+            {
+                // Get number literal from format string
+                while (isdigit_c16(fmt[i]))
+                    min_field_width = (min_field_width * 10) + (fmt[i++] - u'0');
+            }
+
+            // Check for precision/maximum field width e.g. in "8.2" this would be 2
+            if (fmt[i] == u'.')
+            {
+                input_precision = true;
+                i++;
+                if (fmt[i] == u'*')
+                {
+                    // Get int argument for precision
+                    precision = va_arg(args, int);
+                    i++;
+                }
+                else
+                {
+                    // Get number literal from format string
+                    while (isdigit_c16(fmt[i]))
+                        precision = (precision * 10) + (fmt[i++] - u'0');
+                }
+            }
+
+            // Check for Length modifiers e.g. h/hh/l/ll
+            if (fmt[i] == u'h')
+            {
+                i++;
+                length_bits = 16; // h
+                if (fmt[i] == u'h')
+                {
+                    i++;
+                    length_bits = 8; // hh
+                }
+            }
+            else if (fmt[i] == u'l')
+            {
+                i++;
+                length_bits = 32; // l
+                if (fmt[i] == u'l')
+                {
+                    i++;
+                    length_bits = 64; // ll
+                }
+            }
+
+            // Check for conversion specifier
             switch (fmt[i])
             {
             case u'c':
             {
-                str[0] = va_arg(args, int);
-                cout->OutputString(cout, str);
+                // Print CHAR16 value; printf("%c", char)
+                if (length_bits == 8)
+                    charstr[0] = (char)va_arg(args, int); // %hhc "ascii" or other 8 bit char
+                else
+                    charstr[0] = (CHAR16)va_arg(args, int); // Assuming 16 bit char16_t
+
+                // Only add non-null characters, to not end string early
+                if (charstr[0])
+                    buf[buf_idx++] = charstr[0];
             }
             break;
+
             case u's':
             {
-                CHAR16 *string = va_arg(args, CHAR16 *);
-                cout->OutputString(cout, string);
+                // Print CHAR16 string; printf("%s", string)
+                if (length_bits == 8)
+                {
+                    char *string = va_arg(args, char *); // %hhs; Assuming 8 bit ascii chars
+                    while (*string)
+                    {
+                        buf[buf_idx++] = *string++;
+                        if (++num_printed == precision)
+                            break; // Stop printing at max characters
+                    }
+                }
+                else
+                {
+                    CHAR16 *string = va_arg(args, CHAR16 *); // Assuming 16 bit char16_t
+                    while (*string)
+                    {
+                        buf[buf_idx++] = *string++;
+                        if (++num_printed == precision)
+                            break; // Stop printing at max characters
+                    }
+                }
             }
             break;
-            case u'u':
-            {
-                UINT32 number = va_arg(args, UINT32);
-                print_number(number, 10, false);
-            }
-            break;
+
             case u'd':
             {
-                INT32 number = va_arg(args, INT32);
-                print_number(number, 10, true);
+                // Print INT32; printf("%d", number_int32)
+                int_num = true;
+                base = 10;
+                signed_num = true;
             }
             break;
+
             case u'x':
             {
-                UINTN hex = va_arg(args, UINTN);
-                print_number(hex, 16, false);
+                // Print hex UINTN; printf("%x", number_uintn)
+                int_num = true;
+                base = 16;
+                signed_num = false;
+                if (alternate_form)
+                {
+                    buf[buf_idx++] = u'0';
+                    buf[buf_idx++] = u'x';
+                }
             }
             break;
+
+            case u'u':
+            {
+                // Print UINT32; printf("%u", number_uint32)
+                int_num = true;
+                base = 10;
+                signed_num = false;
+            }
+            break;
+
             case u'b':
             {
-                UINTN hex = va_arg(args, UINTN);
-                print_number(hex, 2, false);
+                // Print UINTN as binary; printf("%b", number_uintn)
+                int_num = true;
+                base = 2;
+                signed_num = false;
+                if (alternate_form)
+                {
+                    buf[buf_idx++] = u'0';
+                    buf[buf_idx++] = u'b';
+                }
             }
             break;
+
             case u'o':
             {
-                UINTN hex = va_arg(args, UINTN);
-                print_number(hex, 8, false);
+                // Print UINTN as octal; printf("%o", number_uintn)
+                int_num = true;
+                base = 8;
+                signed_num = false;
+                if (alternate_form)
+                {
+                    buf[buf_idx++] = u'0';
+                    buf[buf_idx++] = u'o';
+                }
             }
             break;
+
+            case u'f':
+            {
+                // Print INTN rounded float value
+                double_num = true;
+                signed_num = true;
+                base = 10;
+                if (!input_precision)
+                    precision = 6; // Default decimal places to print
+            }
+            break;
+
             default:
-                cout->OutputString(cout, u"  Invalid format specifier: %");
-                str[0] = fmt[i];
-                cout->OutputString(cout, str);
-                cout->OutputString(cout, u"\r\n");
-                goto end;
+                strcpy_c16(buf, u"Invalid format specifier: %");
+                charstr[0] = fmt[i];
+                strcat_c16(buf, charstr);
+                strcat_c16(buf, u"\r\n");
                 result = false;
+                goto end;
                 break;
+            }
+
+            if (int_num)
+            {
+                // Number conversion: Integer
+                UINT64 number = 0;
+                switch (length_bits)
+                {
+                case 0:
+                case 32:
+                default:
+                    // l
+                    number = va_arg(args, UINT32);
+                    if (signed_num)
+                        number = (INT32)number;
+                    break;
+
+                case 8:
+                    // hh
+                    number = (UINT8)va_arg(args, int);
+                    if (signed_num)
+                        number = (INT8)number;
+                    break;
+
+                case 16:
+                    // h
+                    number = (UINT16)va_arg(args, int);
+                    if (signed_num)
+                        number = (INT16)number;
+                    break;
+
+                case 64:
+                    // ll
+                    number = va_arg(args, UINT64);
+                    if (signed_num)
+                        number = (INT64)number;
+                    break;
+                }
+
+                // Add space before positive number for ' ' flag
+                if (space_flag && signed_num && (INTN)number >= 0)
+                    buf[buf_idx++] = u' ';
+
+                // Add sign +/- before signed number for '+' flag
+                if (plus_flag && signed_num)
+                    buf[buf_idx++] = (INTN)number >= 0 ? u'+' : u'-';
+
+                add_int_to_buf_c16(number, base, signed_num, precision, buf, &buf_idx);
+            }
+
+            if (double_num)
+            {
+                // Number conversion: Float/Double
+                double number = va_arg(args, double);
+                INTN whole_num = 0;
+
+                // Get digits before decimal point
+                whole_num = (INTN)number;
+                if (whole_num < 0)
+                    whole_num = -whole_num;
+
+                UINTN num_digits = 0;
+                do
+                {
+                    num_digits++;
+                    whole_num /= 10;
+                } while (whole_num > 0);
+
+                // Add digits to write buffer
+                add_int_to_buf_c16(number, base, signed_num, num_digits, buf, &buf_idx);
+
+                // Print decimal digits equal to precision value,
+                //   if precision is explicitly 0 then do not print
+                if (!input_precision || precision != 0)
+                {
+                    buf[buf_idx++] = u'.'; // Add decimal point
+
+                    if (number < 0.0)
+                        number = -number; // Ensure number is positive
+                    whole_num = (INTN)number;
+                    number -= whole_num; // Get only decimal digits
+                    signed_num = FALSE;  // Don't print negative sign for decimals
+
+                    // Move precision # of decimal digits before decimal point
+                    //   using base 10, number = number * 10^precision
+                    for (UINTN i = 0; i < precision; i++)
+                        number *= 10;
+
+                    // Add digits to write buffer
+                    add_int_to_buf_c16(number, base, signed_num, precision, buf, &buf_idx);
+                }
+            }
+
+            // Flags are defined such that 0 is overruled by left justify and precision
+            if (padding_char == u'0' && (left_justify || precision > 0))
+                padding_char = u' ';
+
+            // Add padding depending on flags (0 or space) and left/right justify
+            INTN diff = min_field_width - buf_idx;
+            if (diff > 0)
+            {
+                if (left_justify)
+                {
+                    // Append padding to minimum width, always spaces
+                    while (diff--)
+                        buf[buf_idx++] = u' ';
+                }
+                else
+                {
+                    // Right justify
+                    // Copy buffer to end of buffer
+                    INTN dst = min_field_width - 1, src = buf_idx - 1;
+                    while (src >= 0)
+                        buf[dst--] = buf[src--]; // e.g. "TEST\0\0" -> "TETEST"
+
+                    // Overwrite beginning of buffer with padding
+                    dst = (int_num && alternate_form) ? 2 : 0; // Skip 0x/0b/0o/... prefix
+                    while (diff--)
+                        buf[dst++] = padding_char; // e.g. "TETEST" -> "  TEST"
+                }
             }
         }
         else
         {
             // Not formatted string, print next character
-            str[0] = fmt[i];
-            cout->OutputString(cout, str);
+            buf[buf_idx++] = fmt[i];
         }
     }
+
 end:
+    buf[buf_idx] = u'\0';
     va_end(args);
     return result;
 }
-bool error(CHAR16 *fmt, ...)
+
+bool vfprintf_c16(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *stream, CHAR16 *fmt, va_list args)
+{
+    CHAR16 buf[1024]; // Format string buffer for % strings
+    if (!format_string_c16(buf, fmt, args))
+        return false;
+
+    return !EFI_ERROR(stream->OutputString(stream, buf));
+}
+
+bool printf(CHAR16 *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    bool result = printf(fmt, args);
-    va_end(args);
-    get_key();
-    return result;
+    return vfprintf_c16(printf_cout, fmt, args);
 }

@@ -2,9 +2,23 @@
 EFI_EVENT timer_event;
 EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
 {
+    CHAR16 *EFI_ERROR_STRINGS[MAX_EFI_ERROR] = {
+        [3] = u"EFI_UNSUPPORTED",
+        [5] = u"EFI_BUFFER_TOO_SMALL",
+        [7] = u"EFI_DEVICE_ERROR",
+        [14] = u"EFI_NOT_FOUND",
+        [27] = u"EFI_CRC_ERROR",
+    };
+    EFI_ERROR_STRINGS[1] = EFI_ERROR_STRINGS[1];
     INIT(SystemTable, ImageHandl);
 
+    cin->Reset(cin, FALSE);
+    cout->Reset(cout, FALSE);
+    cerr->Reset(cerr, FALSE);
+
     cout->SetAttribute(cout, EFI_TEXT_ATTR(EFI_YELLOW, EFI_BLUE));
+
+    bs->SetWatchdogTimer(0, 0x10000, 0, NULL);
 
     cout->ClearScreen(cout);
     /*
@@ -13,7 +27,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
             printf(u"%x", (CHAR16)key.UnicodeChar);
             get_key();*/
     bool running = true;
-    const CHAR16 *Menu_Choices[9] = {
+
+    printf(u"%d\r\n", (UINT32)42);
+    get_key();
+    const CHAR16 *Menu_Choices[11] = {
         u"Set Text Mode",
         u"Set Graphics Mode",
         u"Test Mouse",
@@ -22,6 +39,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
         u"Print Memory Map",
         u"Print Configuration Tables",
         u"Print ACPI Tables",
+        u"Print EFI Global Variables",
+        u"Change Boot Variables",
         u"Load Kernel",
     };
     EFI_STATUS (*mfuncs[])(void) = {
@@ -33,6 +52,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
         print_memory_map,
         print_configuration_table,
         print_ACPI_table,
+        print_efi_global_variables,
+        change_global_variables,
         load_kernel,
     };
     while (running)
@@ -41,7 +62,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
 
         UINTN cols = 0, rows = 0;
         cout->QueryMode(cout, cout->Mode->Mode, &cols, &rows);
-
+        text_cols = cols;
+        text_rows = rows;
         screen_bounds datetime_context = {cols, rows};
 
         bs->CloseEvent(timer_event);
@@ -73,26 +95,38 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandl, EFI_SYSTEM_TABLE *SystemTable)
             switch (key.ScanCode)
             {
             case UP_ARROW:
+
+                cout->SetAttribute(cout, EFI_TEXT_ATTR(DEFAULT_FG_COLOR, DEFAULT_BG_COLOR));
+                printf(u"                      \r  %s\r  ", Menu_Choices[currunt_row]);
                 if (currunt_row - 1 >= min_row)
                 {
-                    cout->SetAttribute(cout, EFI_TEXT_ATTR(DEFAULT_FG_COLOR, DEFAULT_BG_COLOR));
-                    printf(u"                      \r  %s\r  ", Menu_Choices[currunt_row]);
                     currunt_row--;
-                    cout->SetCursorPosition(cout, 0, currunt_row);
-                    cout->SetAttribute(cout, EFI_TEXT_ATTR(HIGHLIGHT_FG_COLOR, HIGHLIGHT_BG_COLOR));
-                    printf(u"                      \r  %s\r  ", Menu_Choices[currunt_row]);
                 }
+                else
+                {
+                    currunt_row = max_row;
+                }
+                cout->SetCursorPosition(cout, 0, currunt_row);
+                cout->SetAttribute(cout, EFI_TEXT_ATTR(HIGHLIGHT_FG_COLOR, HIGHLIGHT_BG_COLOR));
+                printf(u"                      \r  %s\r  ", Menu_Choices[currunt_row]);
+
                 break;
             case DOWN_ARROW:
+
+                cout->SetAttribute(cout, EFI_TEXT_ATTR(DEFAULT_FG_COLOR, DEFAULT_BG_COLOR));
+                printf(u"                      \r  %s\r  ", Menu_Choices[currunt_row]);
                 if (currunt_row + 1 <= max_row)
                 {
-                    cout->SetAttribute(cout, EFI_TEXT_ATTR(DEFAULT_FG_COLOR, DEFAULT_BG_COLOR));
-                    printf(u"                      \r  %s\r  ", Menu_Choices[currunt_row]);
                     currunt_row++;
-                    cout->SetCursorPosition(cout, 0, currunt_row);
-                    cout->SetAttribute(cout, EFI_TEXT_ATTR(HIGHLIGHT_FG_COLOR, HIGHLIGHT_BG_COLOR));
-                    printf(u"                      \r  %s\r  ", Menu_Choices[currunt_row]);
                 }
+                else
+                {
+                    currunt_row = min_row;
+                }
+                cout->SetCursorPosition(cout, 0, currunt_row);
+                cout->SetAttribute(cout, EFI_TEXT_ATTR(HIGHLIGHT_FG_COLOR, HIGHLIGHT_BG_COLOR));
+                printf(u"                      \r  %s\r  ", Menu_Choices[currunt_row]);
+
                 break;
             case ESC:
                 bs->CloseEvent(timer_event);
